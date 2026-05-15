@@ -1,0 +1,20 @@
+ItemID,VarName,DataType,Scale,Source,Description
+1,GVS1_QuotaReale,FLOAT,1000,ErrAsseXGVS,Axis 1 X real position (mm*1000) - drive 34UX21 EtherCAT CN(3)
+2,GVS1_StatoAsse,INT,1,ErrAsseXGVS,Axis 1 state code (4=In Position 추정)
+3,GVS1_ErroreAnello,FLOAT,1000,ErrAsseXGVS,Axis 1 loop error (mm*1000)
+4,GVS2_QuotaReale,FLOAT,1000,ErrAsseXGVS,Axis 2 X real position (mm*1000) - drive 34UX22 EtherCAT CN(7)
+5,GVS2_StatoAsse,INT,1,ErrAsseXGVS,Axis 2 state code
+6,GVS2_ErroreAnello,FLOAT,1000,ErrAsseXGVS,Axis 2 loop error (mm*1000)
+7,GVS3_QuotaReale,FLOAT,1000,ErrAsseXGVS,Axis 3 X real position (mm*1000) - drive 34UX23 EtherCAT CN(11)
+8,GVS3_StatoAsse,INT,1,ErrAsseXGVS,Axis 3 state code
+9,GVS3_ErroreAnello,FLOAT,1000,ErrAsseXGVS,Axis 3 loop error (mm*1000)
+10,MachineState,INT,1,MONTH.TER,Machine state (1=RUN 2=STOP 3=ALARM)
+11,DailyRunTimeMin,INT,1,MONTH.TER,Daily runtime in minutes
+12,DailyStartCount,INT,1,MONTH.TER,Daily start event count
+13,DailyAlarmCount,INT,1,MONTH.TER,Daily alarm/error event count
+14,GVS4_QuotaReale,FLOAT,1000,ErrAsseXGVS,Axis 4 X real position (mm*1000) - drive 34UX24 (PRESENZA_GVS_4=1)
+15,GVS4_StatoAsse,INT,1,ErrAsseXGVS,Axis 4 state code
+16,GVS4_ErroreAnello,FLOAT,1000,ErrAsseXGVS,Axis 4 loop error (mm*1000)
+17,GVS5_QuotaReale,FLOAT,1000,ErrAsseXGVS,Axis 5 X real position (mm*1000) - drive 34UX25 (PRESENZA_GVS_5=1)
+18,GVS5_StatoAsse,INT,1,ErrAsseXGVS,Axis 5 state code
+19,GVS5_ErroreAnello,FLOAT,1000,ErrAsseXGVS,Axis 5 loop error (mm*1000)
