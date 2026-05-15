@@ -1,0 +1,41 @@
+# ============================================
+# BC++ Builder 6 - .gitignore
+# ============================================
+
+# 컴파일 중간 산출물
+*.obj
+*.tds
+*.map
+*.ils
+*.ilf
+*.ilc
+*.ild
+*.dcu
+
+# 최종 바이너리 (필요시 Release 별도 관리)
+*.exe
+*.bpl
+*.bpi
+*.lib
+
+# BCB6 백업 파일 (편집 시 자동 생성)
+*.~cpp
+*.~h
+*.~dfm
+*.~bpr
+
+# IDE 개인 환경 파일
+*.dsk
+*.local
+__history/
+
+# 프리컴파일드 헤더
+*.csm
+*.#??
+
+# 디버그 관련
+*.pdb
+
+# Windows 임시
+Thumbs.db
+Desktop.ini
