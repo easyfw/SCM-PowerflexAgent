@@ -95,6 +95,10 @@ __fastcall TSCM_PowerflexAgent::TSCM_PowerflexAgent(TComponent* Owner)
     m_lLastAxisFilePos = 0;
     m_sCurrentMonthFile = "";
 
+    // Worker thread
+    m_hWorkerThread = NULL;
+    m_bWorkerStop = false;
+
     for (int i = 0; i < pgCOUNT; i++)
     {
         m_Groups[i].nCycleCount = 0;
@@ -198,7 +202,12 @@ void __fastcall TSCM_PowerflexAgent::WriteStatusFile(String msg)
         FILE_ATTRIBUTE_NORMAL,
         NULL
     );
-    if (hFile == INVALID_HANDLE_VALUE) return;
+    if (hFile == INVALID_HANDLE_VALUE)
+    {
+        // status 파일 생성 실패 시에만 기록(조용한 실패 방지)
+        LogMessage("STATUS write fail err=" + IntToStr((int)GetLastError()));
+        return;
+    }
 
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -1405,7 +1414,7 @@ void __fastcall TSCM_PowerflexAgent::ServiceStart(TService *Sender,
 {
     if (Timer1) Timer1->Enabled = false;
 
-    LogMessage("SVC START - SCM-PowerFlex (Morbidelli PWX100)");
+    LogMessage("SVC START - SCM-PowerFlex (Morbidelli PWX100) v1.1");
     Started = true;
 
     try
@@ -1527,18 +1536,17 @@ void __fastcall TSCM_PowerflexAgent::ServiceStart(TService *Sender,
         m_bFirstSend = true;
         m_dwLastSendTick = 0;
 
-        // 4. Start timer
-        if (Timer1)
-        {
-            Timer1->Interval = m_nTimeInterval;
-            Timer1->Enabled = true;
-            LogMessage("Timer1 enabled, Interval="
-                     + IntToStr(Timer1->Interval));
-        }
+        // 4. Start worker thread (TTimer 대체)
+        //   서비스엔 메시지펌프가 없어 TTimer(WM_TIMER)가 안 도는 경우가 있다.
+        //   COM 의존 없이 확실히 도는 워커 스레드로 주기 폴링을 수행한다.
+        m_bWorkerStop = false;
+        m_hWorkerThread = CreateThread(NULL, 0, WorkerThreadProc, this, 0, NULL);
+        if (m_hWorkerThread != NULL)
+            LogMessage("Worker thread started, Interval="
+                     + IntToStr(m_nTimeInterval));
         else
-        {
-            LogMessage("ERROR: Timer1 is NULL!");
-        }
+            LogMessage("ERROR: Worker thread create FAIL err="
+                     + IntToStr((int)GetLastError()));
 
         LogMessage("SVC READY");
     }
@@ -1556,6 +1564,14 @@ void __fastcall TSCM_PowerflexAgent::ServiceStop(TService *Sender,
 {
     LogMessage("SVC STOP");
 
+    // 워커 스레드 정지 (최대 10초 대기)
+    m_bWorkerStop = true;
+    if (m_hWorkerThread != NULL)
+    {
+        WaitForSingleObject(m_hWorkerThread, 10000);
+        CloseHandle(m_hWorkerThread);
+        m_hWorkerThread = NULL;
+    }
     if (Timer1) Timer1->Enabled = false;
     CloseSerialPort();
 
@@ -1570,10 +1586,38 @@ void __fastcall TSCM_PowerflexAgent::ServiceStop(TService *Sender,
 //   - SQL 재연결 로직 제거 (파일 폴링은 영구 연결 없음)
 //   - PollDailyReport 등 4개 SQL 함수 → PollErrAsseXGVS, PollMonthlyReport
 //---------------------------------------------------------------------------
-void __fastcall TSCM_PowerflexAgent::Timer1Timer(TObject *Sender)
+//---------------------------------------------------------------------------
+// WorkerThreadProc - 워커 스레드 진입점 (TTimer 대체)
+//   m_nTimeInterval 주기로 DoPollCycle() 호출. 정지신호에 빠르게 반응하도록
+//   대기를 100ms 로 쪼갠다. 첫 사이클은 즉시 실행(초기 데이터 빠르게).
+//---------------------------------------------------------------------------
+DWORD WINAPI TSCM_PowerflexAgent::WorkerThreadProc(LPVOID param)
 {
-    Timer1->Enabled = false;
+    TSCM_PowerflexAgent* self = (TSCM_PowerflexAgent*)param;
+    bool firstLoop = true;
+    while (!self->m_bWorkerStop)
+    {
+        if (!firstLoop)
+        {
+            int waited = 0;
+            while (waited < self->m_nTimeInterval && !self->m_bWorkerStop)
+            {
+                Sleep(100);
+                waited += 100;
+            }
+            if (self->m_bWorkerStop) break;
+        }
+        firstLoop = false;
+        self->DoPollCycle();
+    }
+    return 0;
+}
 
+//---------------------------------------------------------------------------
+// DoPollCycle - 1주기 폴링+전송 (구 Timer1Timer 본문, 타이머 토글 제거)
+//---------------------------------------------------------------------------
+void __fastcall TSCM_PowerflexAgent::DoPollCycle()
+{
     try
     {
         if (m_ItemCount > 0)
@@ -1583,9 +1627,9 @@ void __fastcall TSCM_PowerflexAgent::Timer1Timer(TObject *Sender)
                 PollErrAsseXGVS();
 
             if (ShouldPollGroup(pgMonthlyReport))
-                PollTier4();   // 하이브리드: PowerProductionReport CSV 우선, 없으면 MONTH.TER
+                PollTier4();
 
-            // 2. Change detection (identical to AH221/GA3)
+            // 2. Change detection
             int changeCount = 0;
             for (int i = 0; i < m_ItemCount; i++)
             {
@@ -1597,7 +1641,7 @@ void __fastcall TSCM_PowerflexAgent::Timer1Timer(TObject *Sender)
             }
             bool hasChanges = (changeCount > 0);
 
-            // 3. Heartbeat timeout (identical to AH221/GA3)
+            // 3. Heartbeat timeout
             DWORD dwNow = GetTickCount();
             bool heartbeatTimeout = false;
 
@@ -1617,7 +1661,7 @@ void __fastcall TSCM_PowerflexAgent::Timer1Timer(TObject *Sender)
                     heartbeatTimeout = true;
             }
 
-            // 4. Send condition (identical to AH221/GA3)
+            // 4. Send condition
             if (m_bFirstSend || hasChanges || heartbeatTimeout)
             {
                 bool isHB = heartbeatTimeout && !hasChanges && !m_bFirstSend;
@@ -1633,8 +1677,14 @@ void __fastcall TSCM_PowerflexAgent::Timer1Timer(TObject *Sender)
     {
         LogMessage("E:" + e.Message);
     }
+}
 
-    Timer1->Enabled = true;
+//---------------------------------------------------------------------------
+// Timer1Timer - 미사용(워커 스레드로 대체). .dfm 바인딩 유지를 위해 남겨둠.
+//---------------------------------------------------------------------------
+void __fastcall TSCM_PowerflexAgent::Timer1Timer(TObject *Sender)
+{
+    DoPollCycle();
 }
 
 //---------------------------------------------------------------------------

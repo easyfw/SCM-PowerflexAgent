@@ -138,6 +138,12 @@ private:
     BYTE        m_SendBuffer[4096];
     bool        m_bFirstSend;
 
+    // === 워커 스레드 (TTimer 대체 - 서비스 메시지펌프 의존 제거) ===
+    HANDLE          m_hWorkerThread;
+    volatile bool   m_bWorkerStop;
+    void __fastcall DoPollCycle();                  // 1주기 폴링+전송 (구 Timer1Timer 본문)
+    static DWORD WINAPI WorkerThreadProc(LPVOID param);
+
     // === Response/Retry (same as AH221) ===
     int         m_nRetryCount;
     int         m_nMaxRetries;
