@@ -86,6 +86,10 @@ __fastcall TSCM_PowerflexAgent::TSCM_PowerflexAgent(TComponent* Owner)
     m_nBaudRate = 115200;
     m_nTimeInterval = 5000;
 
+    // PowerProductionReport (Tier4 신규 소스) 기본값 - INI 에서 덮어씀
+    m_sPprBase = "C:\\Report_PI\\PowerProductionReport\\";
+    m_bPprEnabled = true;
+
     // File tracking initial state
     m_sLastAxisFile = "";
     m_lLastAxisFilePos = 0;
@@ -227,7 +231,7 @@ void __fastcall TSCM_PowerflexAgent::LoadSettings()
     {
         // [Albatros] - 설치 경로
         m_sAlbatrosBase = ini->ReadString("Albatros", "BasePath",
-                                          "C:\\SCM-Powerflex_log\\");
+                                          "C:\\Albatros\\");
         if (m_sAlbatrosBase[m_sAlbatrosBase.Length()] != '\\')
             m_sAlbatrosBase += "\\";
 
@@ -246,6 +250,15 @@ void __fastcall TSCM_PowerflexAgent::LoadSettings()
 
         // [Agent]
         m_nTimeInterval = ini->ReadInteger("Agent", "TimeInterval", 5000);
+
+        // [PowerProductionReport] - Tier4 신규 소스 (실 생산데이터 CSV)
+        //   라이브 머신마다 경로가 다를 수 있어 INI 로 둔다(하드코딩 금지).
+        m_sPprBase = ini->ReadString("PowerProductionReport", "BasePath",
+                                     "C:\\Report_PI\\PowerProductionReport\\");
+        if (m_sPprBase.Length() > 0 &&
+            m_sPprBase[m_sPprBase.Length()] != '\\')
+            m_sPprBase += "\\";
+        m_bPprEnabled = ini->ReadBool("PowerProductionReport", "Enabled", true);
 
         // [PollIntervals]
         // 베이스 인터벌이 5초이므로:
@@ -333,12 +346,15 @@ String __fastcall TSCM_PowerflexAgent::GetCurrentMonthFilePath()
 
 String __fastcall TSCM_PowerflexAgent::GetTodayDateString()
 {
-    // Italian date format DD/MM/YYYY (Albatros 가 이탈리아 SW 이므로)
-    // ? 검증 필요: 실 MONTH##.TER 파일에서 매칭 안 되면 MM/DD/YYYY 로 변경
+    // [FIX #3 - 2026-06-03 실데이터 검증] 날짜 포맷은 MM/DD/YYYY 확정.
+    //   근거: 실 MONTH02.TER(2월 파일)에 02/02, 02/09, 02/23 출현.
+    //         앞자리가 전부 02(=월), 23은 일 -> MM/DD/YYYY 확정.
+    //   기존 코드는 DD/MM/YYYY 가정이라 day!=month 인 날 매칭이 전부 빗나가
+    //   Tier 4 통계가 통째로 0/STOP 으로 나갔음.
     SYSTEMTIME st;
     GetLocalTime(&st);
     String s;
-    s.printf("%02d/%02d/%04d", st.wDay, st.wMonth, st.wYear);
+    s.printf("%02d/%02d/%04d", st.wMonth, st.wDay, st.wYear);  // MM/DD/YYYY
     return s;
 }
 
@@ -533,11 +549,8 @@ bool __fastcall TSCM_PowerflexAgent::PollErrAsseXGVS()
         };
         for (int i = 0; i < 15; i++)
             UpdateItemByID(axisIDsForBadQuality[i], 0, 0x00);
-
-		#if HK_DEBUG
+        if (HK_DEBUG)
             LogMessage("AXIS: file not found");
-		#endif
-
         return false;
     }
 
@@ -577,12 +590,16 @@ bool __fastcall TSCM_PowerflexAgent::PollErrAsseXGVS()
             }
             buf[nRead] = '\0';
 
-            // 마지막 완전 라인(\r\n)의 끝 위치 찾기
-            // ? 그 이후는 불완전 라인이므로 다음 폴링까지 보류
+            // [FIX #1 - 2026-06-03 실데이터 검증] 레코드 구분자는 CR(0x0D) 단독.
+            //   근거: 실파일 20260512_ErrAsseXGVS.txt 는 LF(0x0A) 0개, CR 3개.
+            //         "...resSpace=0; \rGVS2_X;..." 처럼 CR 로만 레코드 구분.
+            //   기존 코드는 '\n' 만 라인 경계로 인정 -> lastNewline 이 항상 -1 이 되어
+            //   읽기 위치를 전진시키지 못하고 축 데이터를 영원히 한 줄도 파싱 못 했음.
+            //   => CR 또는 LF 어느 쪽이든 마지막 경계로 인정한다.
             int lastNewline = -1;
             for (int i = (int)nRead - 1; i >= 0; i--)
             {
-                if (buf[i] == '\n')
+                if (buf[i] == '\n' || buf[i] == '\r')
                 {
                     lastNewline = i;
                     break;
@@ -601,8 +618,13 @@ bool __fastcall TSCM_PowerflexAgent::PollErrAsseXGVS()
             int parseLen = lastNewline + 1;
             m_lLastAxisFilePos += parseLen;
 
-            // 라인별 분해
+            // [FIX #1 - 2026-06-03] CR-only 레코드를 안전하게 분해하기 위해
+            //   buf 의 CR(0x0D) 을 모두 LF(0x0A) 로 정규화한 뒤 TStringList 에 넘긴다.
+            //   (BCB6 TStringList::Text 의 CR-only 분리 동작에 의존하지 않기 위한
+            //    방어적 처리. CRLF 였다면 CR->LF 로 빈 줄이 생기나 아래에서 skip 됨.)
             AnsiString chunk(buf, parseLen);
+            for (int ci = 1; ci <= chunk.Length(); ci++)
+                if (chunk[ci] == '\r') chunk[ci] = '\n';
             TStringList* lines = new TStringList();
             try
             {
@@ -666,15 +688,19 @@ bool __fastcall TSCM_PowerflexAgent::PollErrAsseXGVS()
 //   4. 마지막 이벤트로 MachineState 결정
 //   5. start/stop 페어로 가동시간 합산
 //
-// MONTH##.TER 라인 예 (사용자 스크린샷):
-//   "07:55:56 02/02/2026 Albatros starts execution (3.1.9 ...) ID:... [...] 1"
+// MONTH##.TER 라인 예 (실파일 확인됨, UTF-16LE):
+//   "07:55:56 02/02/2026 Albatros starts execution (3.1.9 ...) ID:52923 [PWX100AA...] 1"
 //   "07:57:00 02/02/2026 Albatros stops execution                       2"
 //   "08:17:01 02/23/2026 TMSCan+ 2: Not found  System  1035  0  Morbidelli PWX100"
 //
-// ? 검증 필요:
-//   - 날짜 형식이 DD/MM/YYYY 인지 MM/DD/YYYY 인지
-//     (이탈리아 SW 라 DD/MM/YYYY 로 추정했으나 실 데이터로 확인 필요)
-//   - "stops execution" 이 정상 종료 패턴인지 (다른 변종이 있을 수도)
+// [검증완료 2026-06-03] 날짜 형식 = MM/DD/YYYY (FIX #3 반영), 인코딩 = UTF-16LE(FIX #2 반영).
+//
+// [주의 #4 - 의미 재정의 필요] "Albatros starts/stops execution" 은 머신 가동이 아니라
+//   Albatros HMI 소프트웨어의 실행/종료 이벤트다(2월에 21회 start/21회 stop = HMI 재시작 반복).
+//   따라서 현재의 DailyRunTimeMin 은 "HMI 가 켜져있던 시간", DailyStartCount 는
+//   "HMI 실행 횟수" 를 측정할 뿐 실제 머신 가동률이 아니다. 이 통계를 머신 가동으로
+//   쓰려면 ErrAsseXGVS 의 statoAsse/velocita 변화 기반 추정 등으로 재설계가 필요하다.
+//   (※ 이 함수의 RunTime/StartCount 산출 로직은 그 전까지 '참조용'으로만 볼 것)
 //---------------------------------------------------------------------------
 bool __fastcall TSCM_PowerflexAgent::PollMonthlyReport()
 {
@@ -699,11 +725,8 @@ bool __fastcall TSCM_PowerflexAgent::PollMonthlyReport()
         UpdateItemByID(11, 0, 0x00);
         UpdateItemByID(12, 0, 0x00);
         UpdateItemByID(13, 0, 0x00);
-
-		#if HK_DEBUG
+        if (HK_DEBUG)
             LogMessage("MONTH: file not found " + ExtractFileName(filePath));
-		#endif
-
         return false;
     }
 
@@ -730,17 +753,40 @@ bool __fastcall TSCM_PowerflexAgent::PollMonthlyReport()
             }
             buf[nRead] = '\0';
 
+            // [FIX #2 - 2026-06-03 실데이터 검증] MONTH##.TER 은 BOM 없는 UTF-16LE.
+            //   근거: 실 MONTH02.TER 앞바이트 54 00 69 00 ... = 'T'\0'i'\0'm'\0'e'\0
+            //         (글자마다 상위바이트 0x00 이 붙는 2바이트/문자 인코딩).
+            //   기존 코드는 단일바이트 ASCII 로 파싱 -> 날짜/이벤트 문자열 매칭이
+            //   글자 사이 0x00 때문에 절대 성립하지 않아 Tier 4 통계가 전부 0/STOP.
+            //   => 로그 내용이 ASCII 범위이므로 하위바이트만 추출해
+            //      단일바이트 문자열(asc)로 변환한 뒤 기존 파서를 그대로 사용한다.
+            //      UTF-16 의 줄바꿈 0D 00 0A 00 은 변환 후 0D 0A(CRLF) 가 되어
+            //      TStringList 가 정상 분리한다.
+            DWORD u16Start = 0;
+            if (nRead >= 2 && (BYTE)buf[0] == 0xFF && (BYTE)buf[1] == 0xFE)
+                u16Start = 2;                 // BOM(FF FE) 이 있으면 건너뜀
+            char* asc = new char[(nRead / 2) + 2];
+            int   ascLen = 0;
+            for (DWORD bi = u16Start; bi + 1 < nRead; bi += 2)
+            {
+                // 상위바이트(buf[bi+1])가 0 이 아니면 비-ASCII -> '?' 로 대체
+                // (통계 파싱에 쓰는 토큰은 모두 ASCII 라 영향 없음)
+                asc[ascLen++] = ((BYTE)buf[bi + 1] == 0x00) ? buf[bi] : '?';
+            }
+            asc[ascLen] = '\0';
+
             // 통계 변수
             int  startCount = 0;
             int  alarmCount = 0;
             int  lastEvent  = 0;       // 1=START, 2=STOP, 3=ALARM, 0=NONE
             long runTimeSec = 0;       // 가동시간(초) ? start/stop 페어 합
 
-            long lastStartTick = 0;   // HH:MM:SS 를 초로 변환한 값
+            DWORD lastStartTick = 0;   // HH:MM:SS 를 초로 변환한 값
             bool  bInStart      = false;
 
-            // 라인 파서 ? 줄바꿈으로 split
-            AnsiString chunk(buf, nRead);
+            // 라인 파서 ? 줄바꿈으로 split (UTF-16 변환된 asc 사용)
+            AnsiString chunk(asc, ascLen);
+            delete[] asc;   // chunk 가 자체 복사본을 가지므로 즉시 해제 안전
             TStringList* lines = new TStringList();
             try
             {
@@ -820,13 +866,13 @@ bool __fastcall TSCM_PowerflexAgent::PollMonthlyReport()
                 UpdateItemByID(12, (long)startCount,       0xC0);
                 UpdateItemByID(13, (long)alarmCount,       0xC0);
 
-				#if HK_DEBUG
+                if (HK_DEBUG)
+                {
                     LogMessage("MONTH: state=" + IntToStr(state)
                              + " run=" + IntToStr(runTimeSec / 60) + "m"
                              + " starts=" + IntToStr(startCount)
                              + " alarms=" + IntToStr(alarmCount));
-				#endif
-                
+                }
                 ok = true;
             }
             __finally { delete lines; }
@@ -841,6 +887,216 @@ bool __fastcall TSCM_PowerflexAgent::PollMonthlyReport()
 
     CloseHandle(hFile);
     return ok;
+}
+
+//---------------------------------------------------------------------------
+// [Tier4 재지향 - 2026-06-03] PowerProductionReport CSV 기반 가동통계
+//
+// 배경: 기존 Tier4(MONTH##.TER)는 HMI 실행/종료만 기록 -> 실 생산과 무관했음.
+//       Albatros PowerInterface 가 생성하는 일별 생산 CSV 로 교체한다.
+//       경로: <base>\pro\YYYY\YYYYMM\YYYYMMDD.csv  (평문 ASCII, CRLF, ISO 날짜)
+//       파일명이 곧 날짜이므로 "오늘 파일"을 직접 열면 됨(in-file 날짜매칭 불필요).
+//
+// 산출 (실 CSV 로 검증: Sum(#PROD 피스) = 공식 #TOTALS 누적과 정확히 일치):
+//   ID 10 MachineState   : 최신 #MAC 상태 -> 1=RUN 2=READY 3=NOT_READY 4=EMG 5=ALARM
+//   ID 11 DailyRunTimeMin : Sum(#PROD 소요시간) / 60
+//   ID 12 DailyPartCount  : Sum(#PROD 피스수)
+//   ID 13 DailyAlarmCount : #MAC;ALARM_ON 발생 수
+//
+// 주의: #TOTALS 는 PowerInterface 세션마다 0 리셋되므로 #PROD 를 직접 합산한다.
+//---------------------------------------------------------------------------
+
+//---------------------------------------------------------------------------
+// GetTodayProductionCsvPath - <base>\pro\YYYY\YYYYMM\YYYYMMDD.csv
+//---------------------------------------------------------------------------
+String __fastcall TSCM_PowerflexAgent::GetTodayProductionCsvPath()
+{
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    String y, ym, ymd;
+    y.printf("%04d", st.wYear);
+    ym.printf("%04d%02d", st.wYear, st.wMonth);
+    ymd.printf("%04d%02d%02d", st.wYear, st.wMonth, st.wDay);
+    return m_sPprBase + "pro\\" + y + "\\" + ym + "\\" + ymd + ".csv";
+}
+
+//---------------------------------------------------------------------------
+// ParseHmsToSec - "HH.MM.SS,cc" -> 초(정수). cc(1/100초)는 분단위 산출이라 버림.
+//---------------------------------------------------------------------------
+long __fastcall TSCM_PowerflexAgent::ParseHmsToSec(const AnsiString& t)
+{
+    int dot1 = t.Pos(".");
+    if (dot1 <= 0) return 0;
+    int hh = StrToIntDef(t.SubString(1, dot1 - 1), 0);
+    AnsiString r1 = t.SubString(dot1 + 1, t.Length() - dot1);
+    int dot2 = r1.Pos(".");
+    if (dot2 <= 0) return 0;
+    int mm = StrToIntDef(r1.SubString(1, dot2 - 1), 0);
+    AnsiString r2 = r1.SubString(dot2 + 1, r1.Length() - dot2);
+    int comma = r2.Pos(",");
+    int ss = (comma > 0) ? StrToIntDef(r2.SubString(1, comma - 1), 0)
+                         : StrToIntDef(r2, 0);
+    return (long)hh * 3600 + (long)mm * 60 + (long)ss;
+}
+
+//---------------------------------------------------------------------------
+// PollPowerProductionReport - 오늘자 생산 CSV 파싱 -> ID 10~13
+//   반환: true=파싱성공(CSV 존재), false=CSV 없음/오류 -> PollTier4 가 폴백
+//
+// [구조] 기존 PollMonthlyReport 와 동일한 BCB6 안전 패턴:
+//   외부 try/catch(Exception) + 내부 try/__finally(buf, lines 해제)
+//   ASCII CRLF 이므로 UTF-16 디코딩 불필요(MONTH.TER 와 달리).
+//---------------------------------------------------------------------------
+bool __fastcall TSCM_PowerflexAgent::PollPowerProductionReport()
+{
+    String filePath = GetTodayProductionCsvPath();
+
+    HANDLE hFile = CreateFile(
+        filePath.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL
+    );
+
+    if (hFile == INVALID_HANDLE_VALUE)
+    {
+        // 오늘자 CSV 없음(PowerInterface 미실행) -> false 반환해 MONTH.TER 폴백 유도
+        if (HK_DEBUG)
+            LogMessage("PPR: no csv " + ExtractFileName(filePath));
+        return false;
+    }
+
+    bool ok = false;
+    try
+    {
+        DWORD fileSize = GetFileSize(hFile, NULL);
+        if (fileSize == 0 || fileSize == INVALID_FILE_SIZE ||
+            fileSize > 10 * 1024 * 1024)
+        {
+            CloseHandle(hFile);
+            return false;
+        }
+
+        char* buf = new char[fileSize + 1];
+        try
+        {
+            DWORD nRead = 0;
+            if (!ReadFile(hFile, buf, fileSize, &nRead, NULL) || nRead == 0)
+            {
+                delete[] buf;
+                CloseHandle(hFile);
+                return false;
+            }
+            buf[nRead] = '\0';
+
+            long pieces     = 0;     // Sum(#PROD 피스)
+            long runSec     = 0;     // Sum(#PROD 소요시간[초])
+            int  alarmCount = 0;     // #MAC;ALARM_ON 수
+
+            // 상태머신 (우선순위 판정용)
+            bool inEmergency = false;
+            bool inAlarm     = false;
+            bool running     = false;
+            int  lastReady   = 0;    // 1=READY, 2=NOT_READY
+
+            AnsiString chunk(buf, nRead);
+            TStringList* lines = new TStringList();
+            try
+            {
+                lines->Text = chunk;   // ASCII CRLF -> 정상 분리
+
+                for (int li = 0; li < lines->Count; li++)
+                {
+                    AnsiString line = lines->Strings[li];
+                    if (line.IsEmpty()) continue;
+
+                    // ';' 수동 split (최대 16필드). 경로엔 ';' 없어 안전.
+                    AnsiString fld[16];
+                    int nf = 0;
+                    AnsiString rem = line;
+                    while (nf < 16)
+                    {
+                        int sp = rem.Pos(";");
+                        if (sp > 0)
+                        {
+                            fld[nf++] = rem.SubString(1, sp - 1);
+                            rem = rem.SubString(sp + 1, rem.Length() - sp);
+                        }
+                        else { fld[nf++] = rem; break; }
+                    }
+                    if (nf < 2) continue;
+
+                    if (fld[0] == "#MAC")
+                    {
+                        AnsiString st = fld[1].Trim();
+                        if      (st == "EMERGENCY")     inEmergency = true;
+                        else if (st == "READY")       { inEmergency = false; lastReady = 1; }
+                        else if (st == "NOT_READY")   { inEmergency = false; running = false; lastReady = 2; }
+                        else if (st == "ALARM_ON")    { inAlarm = true; alarmCount++; }
+                        else if (st == "ALARM_OFF")     inAlarm = false;
+                        else if (st == "PROGRAM_START") running = true;
+                        else if (st == "PROGRAM_END")   running = false;
+                    }
+                    else if (fld[0] == "#PROD")
+                    {
+                        // 0#PROD 1op 2prog 3X 4Y 5Z 6sd 7st 8ed 9et 10pcs 11dur 12sub 13sub
+                        if (nf >= 12)
+                        {
+                            pieces += StrToIntDef(fld[10].Trim(), 0);
+                            runSec += ParseHmsToSec(fld[11].Trim());
+                        }
+                    }
+                    // #TOTALS 는 세션 리셋 때문에 사용하지 않음(위 #PROD 직접합산)
+                }
+
+                // MachineState 코드 도출 (우선순위)
+                int state;
+                if      (inEmergency)      state = 4;   // EMERGENCY
+                else if (inAlarm)         state = 5;   // ALARM
+                else if (running)         state = 1;   // RUN(프로그램 실행중)
+                else if (lastReady == 1)  state = 2;   // READY/IDLE
+                else                      state = 3;   // NOT_READY/STOP
+
+                UpdateItemByID(10, (long)state,         0xC0);
+                UpdateItemByID(11, (long)(runSec / 60), 0xC0);  // 분
+                UpdateItemByID(12, (long)pieces,        0xC0);
+                UpdateItemByID(13, (long)alarmCount,    0xC0);
+
+                if (HK_DEBUG)
+                {
+                    LogMessage("PPR: state=" + IntToStr(state)
+                             + " run=" + IntToStr(runSec / 60) + "m"
+                             + " parts=" + IntToStr(pieces)
+                             + " alarms=" + IntToStr(alarmCount));
+                }
+                ok = true;
+            }
+            __finally { delete lines; }
+        }
+        __finally { delete[] buf; }
+    }
+    catch (Exception &e)
+    {
+        LogMessage("PPR E: " + e.Message);
+        ok = false;
+    }
+
+    CloseHandle(hFile);
+    return ok;
+}
+
+//---------------------------------------------------------------------------
+// PollTier4 - 하이브리드: PowerProductionReport CSV 우선, 없으면 MONTH.TER 폴백
+//   PowerInterface 가 켜진 날은 실 생산데이터, 꺼진 날은 최소 HMI 가용성 유지.
+//---------------------------------------------------------------------------
+void __fastcall TSCM_PowerflexAgent::PollTier4()
+{
+    if (m_bPprEnabled && PollPowerProductionReport())
+        return;             // 실 생산 CSV 사용
+    PollMonthlyReport();    // 폴백: MONTH##.TER (HMI 가용성)
 }
 
 //---------------------------------------------------------------------------
@@ -1199,6 +1455,11 @@ void __fastcall TSCM_PowerflexAgent::ServiceStart(TService *Sender,
             {  7, "GVS3_QuotaReale",   "Axis 3 X real pos (mm*1000)",    1000 },
             {  8, "GVS3_StatoAsse",    "Axis 3 state code",              1    },
             {  9, "GVS3_ErroreAnello", "Axis 3 loop error (mm*1000)",    1000 },
+            // [주의 #5 - 2026-06-03 실데이터 검증] GVS4/GVS5 는 현재 실 로그에 없음.
+            //   2018~2026.05.12 전체 ErrAsseXGVS 파일에 GVS4_X/GVS5_X 0건(GVS1~3 만 존재).
+            //   PRESENZA_GVS_4/5=1 컴파일 상수와 실제 로그 출력은 별개였음.
+            //   => ID 14~19 는 항상 Quality=Bad(0) 로 전송됨. 3축 운영을 권장하며,
+            //      아래 GVS4/5 등록을 유지할지(미래 대비) 제거할지는 운영 판단 사항.
             // GVS4 (drive 34UX24)
             { 14, "GVS4_QuotaReale",   "Axis 4 X real pos (mm*1000)",    1000 },
             { 15, "GVS4_StatoAsse",    "Axis 4 state code",              1    },
@@ -1261,7 +1522,7 @@ void __fastcall TSCM_PowerflexAgent::ServiceStart(TService *Sender,
 
         // 3. Initial poll test
         if (PollErrAsseXGVS())   LogMessage("INIT AXIS OK");
-        if (PollMonthlyReport()) LogMessage("INIT MONTH OK");
+        PollTier4();             LogMessage("INIT TIER4 done");  // CSV 우선/폴백
 
         m_bFirstSend = true;
         m_dwLastSendTick = 0;
@@ -1322,7 +1583,7 @@ void __fastcall TSCM_PowerflexAgent::Timer1Timer(TObject *Sender)
                 PollErrAsseXGVS();
 
             if (ShouldPollGroup(pgMonthlyReport))
-                PollMonthlyReport();
+                PollTier4();   // 하이브리드: PowerProductionReport CSV 우선, 없으면 MONTH.TER
 
             // 2. Change detection (identical to AH221/GA3)
             int changeCount = 0;
@@ -1377,4 +1638,3 @@ void __fastcall TSCM_PowerflexAgent::Timer1Timer(TObject *Sender)
 }
 
 //---------------------------------------------------------------------------
-

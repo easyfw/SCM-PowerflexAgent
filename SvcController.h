@@ -116,6 +116,10 @@ private:
     String  m_sErrAsseXGVSDir;
     String  m_sTmpDir;
 
+    // === PowerProductionReport (Tier4 신규 소스 - 실 생산데이터) ===
+    String  m_sPprBase;     // INI [PowerProductionReport] BasePath
+    bool    m_bPprEnabled;  // INI [PowerProductionReport] Enabled
+
     int     m_nComPort;
     int     m_nBaudRate;
     int     m_nTimeInterval;    // Base timer interval (ms) - 5000 = 5s
@@ -171,6 +175,12 @@ private:
     // --- Per-group poll functions (replaces AH221's SQL poll functions) ---
     bool __fastcall PollErrAsseXGVS();
     bool __fastcall PollMonthlyReport();
+
+    // Tier4 신규: PowerProductionReport CSV (실 생산데이터) + 하이브리드 분기
+    void   __fastcall PollTier4();                  // CSV 우선, 없으면 MONTH.TER 폴백
+    bool   __fastcall PollPowerProductionReport();  // 오늘자 CSV 파싱 -> ID 10~13
+    String __fastcall GetTodayProductionCsvPath();  // <base>\\pro\\YYYY\\YYYYMM\\YYYYMMDD.csv
+    long   __fastcall ParseHmsToSec(const AnsiString& t); // "HH.MM.SS,cc" -> 초
 
     // --- Albatros file helpers ---
     String __fastcall GetTodayAxisFilePath();    // <dir>\YYYYMMDD_ErrAsseXGVS.txt
